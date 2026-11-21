@@ -1,0 +1,59 @@
+name: build-lowgram-client
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Fetch OwpenGram O9
+        run: |
+          git clone https://github.com/owpengram/owpengram-android-client.git ow
+          cd ow
+          git checkout 7dc25665a75ee6721d7efe13ba3bf5f83eacedf2
+
+      - name: Rebrand to lowgram
+        working-directory: ow
+        run: |
+          sed -i 's/OwpenGram/lowgram/g' TMessagesProj/src/main/res/values/strings.xml
+          sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=com.lowgram.messenger/' gradle.properties
+
+      - name: Signing keystore
+        working-directory: ow
+        env:
+          KS_B64: ${{ secrets.LOWGRAM_KEYSTORE_B64 }}
+        run: |
+          KS=TMessagesProj/config/release.keystore
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+          else
+            echo "::warning::no LOWGRAM_KEYSTORE_B64 secret, generated one-off key: updates over older builds will need reinstall"
+            keytool -genkeypair -keystore "$KS" -storepass lowgram123 -keypass lowgram123 \
+              -alias lowgramkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=lowgram"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install NDK and SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+
+      - name: Build
+        working-directory: ow
+        env:
+          KS_B64: ${{ secrets.LOWGRAM_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            ARGS="-PRELEASE_STORE_PASSWORD=${{ secrets.LOWGRAM_KS_PASSWORD }} -PRELEASE_KEY_PASSWORD=${{ secrets.LOWGRAM_KS_PASSWORD }} -PRELEASE_KEY_ALIAS=${{ secrets.LOWGRAM_KS_ALIAS }}"
+          else
+            ARGS="-PRELEASE_STORE_PASSWORD=lowgram123 -PRELEASE_KEY_PASSWORD=lowgram123 -PRELEASE_KEY_ALIAS=lowgramkey"
+          fi
+          ./gradlew :TMessagesProj_AppStandalone:assembleAfatDebug $ARGS --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lowgram-apk
+          path: ow/TMessagesProj_AppStandalone/build/outputs/apk/afat/debug/*.apk
